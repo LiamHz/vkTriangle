@@ -6,6 +6,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <vector>
+#include <map>
 
 //#define NDEBUG
 
@@ -28,27 +29,29 @@ VkResult CreateDebugUtilsMessengerEXT(
     VkInstance instance,
     const VkDebugUtilsMessengerCreateInfoEXT* pCreateInfo,
     const VkAllocationCallbacks* pAllocator,
-    VkDebugUtilsMessengerEXT* pDebugMessenger) {
+    VkDebugUtilsMessengerEXT* pDebugMessenger
+  ) {
 
-    auto func = (PFN_vkCreateDebugUtilsMessengerEXT)
-                vkGetInstanceProcAddr(instance, "vkCreateDebugUtilsMessengerEXT");
-    if (func != nullptr) {
-        return func(instance, pCreateInfo, pAllocator, pDebugMessenger);
-    } else {
-        return VK_ERROR_EXTENSION_NOT_PRESENT;
-    }
+  auto func = (PFN_vkCreateDebugUtilsMessengerEXT)
+              vkGetInstanceProcAddr(instance, "vkCreateDebugUtilsMessengerEXT");
+  if (func != nullptr) {
+    return func(instance, pCreateInfo, pAllocator, pDebugMessenger);
+  } else {
+    return VK_ERROR_EXTENSION_NOT_PRESENT;
+  }
 }
 
 void DestroyDebugUtilsMessengerEXT(
     VkInstance instance,
     const VkDebugUtilsMessengerEXT debugMessenger,
-    const VkAllocationCallbacks* pAllocator) {
+    const VkAllocationCallbacks* pAllocator
+  ) {
 
-    auto func = (PFN_vkDestroyDebugUtilsMessengerEXT)
-                 vkGetInstanceProcAddr(instance, "vkDestroyDebugUtilsMessengerEXT");
-    if (func != nullptr) {
-      func(instance, debugMessenger, pAllocator);
-    }
+  auto func = (PFN_vkDestroyDebugUtilsMessengerEXT)
+              vkGetInstanceProcAddr(instance, "vkDestroyDebugUtilsMessengerEXT");
+  if (func != nullptr) {
+    func(instance, debugMessenger, pAllocator);
+  }
 }
 
 class HelloTriangleApplication {
@@ -64,6 +67,7 @@ private:
   GLFWwindow* window;
   VkInstance instance;
   VkDebugUtilsMessengerEXT debugMessenger;
+  VkPhysicalDevice physicalDevice = VK_NULL_HANDLE;
 
   void initWindow() {
     glfwInit();
@@ -75,6 +79,60 @@ private:
   void initVulkan() {
     createInstance();
     setupDebugMessenger();
+    pickPhysicalDevice();
+  }
+
+  void pickPhysicalDevice() {
+    uint32_t deviceCount = 0;
+    vkEnumeratePhysicalDevices(instance, &deviceCount, nullptr);
+
+    if (deviceCount == 0) {
+      throw std::runtime_error("failed to find GPUs with Vulkan support!");
+    }
+
+    std::vector<VkPhysicalDevice> devices(deviceCount);
+    vkEnumeratePhysicalDevices(instance, &deviceCount, devices.data());
+
+    // Create map of physical devices sorted by rateDeviceSuitability()
+    std::multimap<int, VkPhysicalDevice> candidates;
+    for (const auto& device : devices) {
+      int score = rateDeviceSuitability(device);
+      candidates.insert(std::make_pair(score, device));
+    }
+
+    // Check if best candidate is suitable at all
+    if (candidates.rbegin()->first > 0) {
+      physicalDevice = candidates.rbegin()->second;
+    } else {
+      throw std::runtime_error("failed to find a suitable GPU!");
+    }
+
+    // Check that physical device was correctly assigned
+    if (physicalDevice == VK_NULL_HANDLE) {
+      throw std::runtime_error("failed to find a suitable GPU!");
+    }
+  }
+
+  int rateDeviceSuitability(VkPhysicalDevice device) {
+    VkPhysicalDeviceProperties deviceProperties;
+    VkPhysicalDeviceFeatures deviceFeatures;
+    vkGetPhysicalDeviceProperties(device, &deviceProperties);
+    vkGetPhysicalDeviceFeatures(device, &deviceFeatures);
+
+    int score = 0;
+
+    // Specify deviceProperties that are preferred
+    if (deviceProperties.deviceType == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU) {
+      score += 1000;
+    }
+    score += deviceProperties.limits.maxImageDimension2D;
+
+    // Specify deviceFeatures that application requires
+    if (!deviceFeatures.shaderInt16) {
+      return 0;
+    }
+
+    return score;
   }
 
   void mainLoop() {
@@ -142,12 +200,12 @@ private:
     createInfo.messageSeverity = VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT
                                | VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT
                                | VK_DEBUG_UTILS_MESSAGE_SEVERITY_VERBOSE_BIT_EXT;
-                               // | VK_DEBUG_UTILS_MESSAGE_SEVERITY_INFO_BIT_EXT;
+                            // | VK_DEBUG_UTILS_MESSAGE_SEVERITY_INFO_BIT_EXT;
 
     // Specify message types that callback is notified for
     createInfo.messageType = VK_DEBUG_UTILS_MESSAGE_TYPE_VALIDATION_BIT_EXT
                            | VK_DEBUG_UTILS_MESSAGE_TYPE_PERFORMANCE_BIT_EXT;
-                           //| VK_DEBUG_UTILS_MESSAGE_TYPE_GENERAL_BIT_EXT;
+                         //| VK_DEBUG_UTILS_MESSAGE_TYPE_GENERAL_BIT_EXT;
   }
 
   void setupDebugMessenger() {
@@ -206,7 +264,8 @@ private:
     VkDebugUtilsMessageSeverityFlagBitsEXT messageSeverity,
     VkDebugUtilsMessageTypeFlagsEXT messageType,
     const VkDebugUtilsMessengerCallbackDataEXT* pCallbackData,
-    void* pUserData) {
+    void* pUserData
+  ) {
 
     std::cerr << "validation layer: " << pCallbackData->pMessage << std::endl;
 
