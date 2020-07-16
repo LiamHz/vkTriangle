@@ -13,3 +13,13 @@ if (VULKAN_FOUND)
   include_directories(${Vulkan_INCLUDE_DIRS})
 	target_link_libraries (${PROJECT_NAME} ${Vulkan_LIBRARIES} glfw)
 endif (VULKAN_FOUND)
+
+# GLSLC command to compile shaders to SPIR-V
+find_program(GLSLC glslc)
+set(shader_path ${CMAKE_HOME_DIRECTORY}/shaders/)
+file(GLOB shaders RELATIVE ${CMAKE_SOURCE_DIR} "${shader_path}*.vert" "${shader_path}*.frag")
+foreach(shader ${shaders})
+  set(input_glsl "${CMAKE_HOME_DIRECTORY}/${shader}")
+  set(output_spv "${input_glsl}.spv")
+  execute_process(COMMAND "glslc" "${input_glsl}" "-o" "${output_spv}")
+endforeach()
