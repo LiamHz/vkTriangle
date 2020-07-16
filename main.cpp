@@ -88,26 +88,27 @@ public:
   }
 
 private:
-  GLFWwindow*              window;
-  VkInstance               instance;
-  VkDebugUtilsMessengerEXT debugMessenger;
-  VkSurfaceKHR             surface;
+  GLFWwindow*                window;
+  VkInstance                 instance;
+  VkDebugUtilsMessengerEXT   debugMessenger;
+  VkSurfaceKHR               surface;
 
-  VkDevice                 device; // Logical device
-  VkPhysicalDevice         physicalDevice = VK_NULL_HANDLE;
+  VkDevice                   device; // Logical device
+  VkPhysicalDevice           physicalDevice = VK_NULL_HANDLE;
 
-  VkQueue                  graphicsQueue;
-  VkQueue                  presentQueue;
+  VkQueue                    graphicsQueue;
+  VkQueue                    presentQueue;
 
-  VkSwapchainKHR           swapChain;
-  VkFormat                 swapChainImageFormat;
-  VkExtent2D               swapChainExtent;
-  std::vector<VkImage>     swapChainImages;
-  std::vector<VkImageView> swapChainImageViews;
+  VkSwapchainKHR             swapChain;
+  VkFormat                   swapChainImageFormat;
+  VkExtent2D                 swapChainExtent;
+  std::vector<VkImage>       swapChainImages;
+  std::vector<VkImageView>   swapChainImageViews;
+  std::vector<VkFramebuffer> swapChainFramebuffers;
 
-  VkRenderPass             renderPass;
-  VkPipelineLayout         pipelineLayout;
-  VkPipeline               graphicsPipeline;
+  VkRenderPass               renderPass;
+  VkPipelineLayout           pipelineLayout;
+  VkPipeline                 graphicsPipeline;
 
   void initWindow() {
     glfwInit();
@@ -126,6 +127,7 @@ private:
     createImageViews();
     createRenderPass();
     createGraphicsPipeline();
+    createFramebuffers();
   }
 
   void mainLoop() {
@@ -135,19 +137,28 @@ private:
   }
 
   void cleanup() {
+    for (auto framebuffer : swapChainFramebuffers) {
+      vkDestroyFramebuffer(device, framebuffer, nullptr);
+    }
+
     vkDestroyPipeline(device, graphicsPipeline, nullptr);
     vkDestroyPipelineLayout(device, pipelineLayout, nullptr);
     vkDestroyRenderPass(device, renderPass, nullptr); 
+
     for (auto imageView : swapChainImageViews) {
       vkDestroyImageView(device, imageView, nullptr);
     }
+
     vkDestroySwapchainKHR(device, swapChain, nullptr);
     vkDestroyDevice(device, nullptr);
-    vkDestroySurfaceKHR(instance, surface, nullptr);
+
     if (enableValidationLayers) {
       DestroyDebugUtilsMessengerEXT(instance, debugMessenger, nullptr);
     }
+
+    vkDestroySurfaceKHR(instance, surface, nullptr);
     vkDestroyInstance(instance, nullptr);
+
     glfwDestroyWindow(window);
     glfwTerminate();
   }
@@ -536,6 +547,27 @@ private:
 
     vkDestroyShaderModule(device, vertShaderModule, nullptr);
     vkDestroyShaderModule(device, fragShaderModule, nullptr);
+  }
+
+  void createFramebuffers() {
+    swapChainFramebuffers.resize(swapChainImageViews.size());
+
+    for (size_t i=0; i < swapChainImageViews.size(); i++) {
+      VkImageView attachments[] = {swapChainImageViews[i]};
+
+      VkFramebufferCreateInfo framebufferInfo{};
+      framebufferInfo.sType           = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
+      framebufferInfo.renderPass      = renderPass;
+      framebufferInfo.attachmentCount = 1;
+      framebufferInfo.pAttachments    = attachments;
+      framebufferInfo.width           = swapChainExtent.width;
+      framebufferInfo.height          = swapChainExtent.height;
+      framebufferInfo.layers          = 1;
+
+        if (vkCreateFramebuffer(device, &framebufferInfo, nullptr, &swapChainFramebuffers[i]) != VK_SUCCESS) {
+          throw std::runtime_error("failed to create framebuffer!");
+        }
+    }
   }
 
   int rateDeviceSuitability(VkPhysicalDevice device) {
