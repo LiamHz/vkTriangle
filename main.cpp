@@ -120,12 +120,20 @@ private:
   std::vector<VkFence>         inFlightFences;
   std::vector<VkFence>         imagesInFlight;
   size_t                       currentFrame = 0;
+  bool                         framebufferResized = false;
 
   void initWindow() {
     glfwInit();
     glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API); // Don't create OpenGL context
     glfwWindowHint(GLFW_RESIZABLE, GLFW_FALSE);
     window = glfwCreateWindow(WIDTH, HEIGHT, "vkTriangle", nullptr, nullptr);
+    glfwSetWindowUserPointer(window, this);
+    glfwSetFramebufferSizeCallback(window, framebufferResizeCallback);
+  }
+
+  static void framebufferResizeCallback(GLFWwindow* window, int width, int height) {
+    auto app = reinterpret_cast<HelloTriangleApplication*>(glfwGetWindowUserPointer(window));
+    app->framebufferResized = true;
   }
 
   void initVulkan() {
@@ -154,6 +162,8 @@ private:
   }
 
   void cleanup() {
+    cleanupSwapChain();
+
     for (size_t i=0; i < MAX_FRAMES_IN_FLIGHT; i++) {
       vkDestroySemaphore(device, imageAvailableSemaphores[i], nullptr);
       vkDestroySemaphore(device, renderFinishedSemaphores[i], nullptr);
@@ -162,19 +172,6 @@ private:
 
     vkDestroyCommandPool(device, commandPool, nullptr);
 
-    for (auto framebuffer : swapChainFramebuffers) {
-      vkDestroyFramebuffer(device, framebuffer, nullptr);
-    }
-
-    vkDestroyPipeline(device, graphicsPipeline, nullptr);
-    vkDestroyPipelineLayout(device, pipelineLayout, nullptr);
-    vkDestroyRenderPass(device, renderPass, nullptr);
-
-    for (auto imageView : swapChainImageViews) {
-      vkDestroyImageView(device, imageView, nullptr);
-    }
-
-    vkDestroySwapchainKHR(device, swapChain, nullptr);
     vkDestroyDevice(device, nullptr);
 
     if (enableValidationLayers) {
@@ -389,6 +386,48 @@ private:
 
     swapChainImageFormat = surfaceFormat.format;
     swapChainExtent      = extent;
+  }
+
+  void cleanupSwapChain() {
+    for (auto framebuffer : swapChainFramebuffers) {
+      vkDestroyFramebuffer(device, framebuffer, nullptr);
+    }
+
+    vkFreeCommandBuffers(
+      device,
+      commandPool,
+      static_cast<uint32_t>(commandBuffers.size()),
+      commandBuffers.data()
+    );
+
+    vkDestroyPipeline(device, graphicsPipeline, nullptr);
+    vkDestroyPipelineLayout(device, pipelineLayout, nullptr);
+    vkDestroyRenderPass(device, renderPass, nullptr);
+
+    for (auto imageView : swapChainImageViews) {
+      vkDestroyImageView(device, imageView, nullptr);
+    }
+
+    vkDestroySwapchainKHR(device, swapChain, nullptr);
+  }
+
+  void recreateSwapChain() {
+    // Handle widow minimization
+    int width = 0, height = 0;
+    glfwGetFramebufferSize(window, &width, &height);
+    while (width == 0 || height == 0) {
+      glfwGetFramebufferSize(window, &width, &height);
+      glfwWaitEvents();
+    }
+
+    vkDeviceWaitIdle(device);
+
+    createSwapChain();
+    createImageViews();
+    createRenderPass();
+    createGraphicsPipeline();
+    createFramebuffers();
+    createCommandBuffers();
   }
 
   void createImageViews() {
@@ -678,9 +717,9 @@ private:
     fenceInfo.flags = VK_FENCE_CREATE_SIGNALED_BIT;
 
     for (size_t i=0; i < MAX_FRAMES_IN_FLIGHT; i++) {
-      if (  vkCreateSemaphore(device, &semaphoreInfo, nullptr, &imageAvailableSemaphores[i]) != VK_SUCCESS
-         || vkCreateSemaphore(device, &semaphoreInfo, nullptr, &renderFinishedSemaphores[i]) != VK_SUCCESS
-         || vkCreateFence(device, &fenceInfo, nullptr, &inFlightFences[i]) != VK_SUCCESS
+      if (   vkCreateSemaphore(device, &semaphoreInfo, nullptr, &imageAvailableSemaphores[i]) != VK_SUCCESS
+          || vkCreateSemaphore(device, &semaphoreInfo, nullptr, &renderFinishedSemaphores[i]) != VK_SUCCESS
+          || vkCreateFence(device, &fenceInfo, nullptr, &inFlightFences[i]) != VK_SUCCESS
       ) {
         throw std::runtime_error("failed to create synchronization objects for a frame!");
       }
@@ -691,7 +730,22 @@ private:
     vkWaitForFences(device, 1, &inFlightFences[currentFrame], VK_TRUE, UINT64_MAX);
 
     uint32_t imageIndex;
-    vkAcquireNextImageKHR(device, swapChain, UINT64_MAX, imageAvailableSemaphores[currentFrame], VK_NULL_HANDLE, &imageIndex);
+    VkResult result = vkAcquireNextImageKHR(
+      device,
+      swapChain,
+      UINT64_MAX,
+      imageAvailableSemaphores[currentFrame],
+      VK_NULL_HANDLE,
+      &imageIndex
+    );
+
+    // Usually happens after a window resize
+    if (result == VK_ERROR_OUT_OF_DATE_KHR) {
+      recreateSwapChain();
+      return;
+    } else if (result != VK_SUCCESS && result != VK_SUBOPTIMAL_KHR) {
+      throw std::runtime_error("failed to acquire swap chain image!");
+    }
 
     // Check if a previous frame is using this image
     // (i.e. there is its fence to wait on)
@@ -731,7 +785,17 @@ private:
     presentInfo.pSwapchains        = swapChains;
     presentInfo.pImageIndices      = &imageIndex;
 
-    vkQueuePresentKHR(presentQueue, &presentInfo);
+    result = vkQueuePresentKHR(presentQueue, &presentInfo);
+
+    if (   result == VK_ERROR_OUT_OF_DATE_KHR
+        || result == VK_SUBOPTIMAL_KHR
+        || framebufferResized
+    ) {
+      recreateSwapChain();
+      return;
+    } else if (result != VK_SUCCESS) {
+      throw std::runtime_error("failed to present swap chain image!");
+    }
 
     currentFrame = (currentFrame + 1) % MAX_FRAMES_IN_FLIGHT;
   }
@@ -830,7 +894,13 @@ private:
     if (capabilities.currentExtent.width != UINT32_MAX) {
       return capabilities.currentExtent;
     } else {
-      VkExtent2D actualExtent = {WIDTH, HEIGHT};
+      int width, height;
+      glfwGetFramebufferSize(window, &width, &height);
+
+      VkExtent2D actualExtent = {
+        static_cast<uint32_t>(width),
+        static_cast<uint32_t>(height)
+      };
 
       // Clamp value of WIDTH and HEIGHT between the min and max
       // extents supported by the implementation
