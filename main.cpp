@@ -1,5 +1,6 @@
 #define GLFW_INCLUDE_VULKAN
 #include <GLFW/glfw3.h>
+#include <glm/glm.hpp>
 #include <vulkan/vulkan.hpp>
 
 #include <fstream>
@@ -11,6 +12,7 @@
 #include <cstdint>
 #include <cstring>
 #include <vector>
+#include <array>
 #include <map>
 #include <set>
 
@@ -79,6 +81,40 @@ struct SwapChainSupportDetails {
   std::vector<vk::PresentModeKHR>   presentModes;
 };
 
+struct Vertex {
+  glm::vec2 pos;
+  glm::vec3 color;
+
+  static vk::VertexInputBindingDescription getBindingDescription() {
+    return vk::VertexInputBindingDescription(
+      0, sizeof(Vertex), vk::VertexInputRate::eVertex
+    );
+  }
+
+  static std::array<vk::VertexInputAttributeDescription, 2> getAttributeDescriptions() {
+    std::array<vk::VertexInputAttributeDescription, 2> attributeDescriptions;
+
+    // Position
+    attributeDescriptions[0] = vk::VertexInputAttributeDescription(
+      0, 0, vk::Format::eR32G32B32Sfloat, offsetof(Vertex, pos)
+    );
+
+    // Color
+    attributeDescriptions[1] = vk::VertexInputAttributeDescription(
+      1, 0, vk::Format::eR32G32B32Sfloat, offsetof(Vertex, color)
+    );
+
+    return attributeDescriptions;
+  }
+};
+
+const std::vector<Vertex> vertices = {
+  //Position       Color
+  {{0.0f, -0.5f}, {1.0f, 0.0f, 0.0f}},
+  {{0.5f,  0.5f}, {0.0f, 1.0f, 0.0f}},
+  {{-0.5f, 0.5f}, {0.0f, 0.0f, 1.0f}}
+};
+
 class vkTriangleApplication {
 public:
   void run() {
@@ -121,9 +157,11 @@ private:
   vk::CommandPool                commandPool;
   std::vector<vk::CommandBuffer> commandBuffers;
 
+  vk::Buffer                     vertexBuffer;
+  vk::DeviceMemory               vertexBufferMemory;
+
   size_t                         currentFrame = 0;
   bool                           framebufferResized = false;
-
 
   void initWindow() {
     glfwInit();
@@ -151,6 +189,7 @@ private:
     createGraphicsPipeline();
     createFramebuffers();
     createCommandPool();
+    createVertexBuffer();
     createCommandBuffers();
     createSyncObjects();
   }
@@ -173,6 +212,8 @@ private:
       device.destroyFence(inFlightFences[i]);
     }
 
+    device.destroyBuffer(vertexBuffer);
+    device.freeMemory(vertexBufferMemory);
     device.destroyCommandPool(commandPool);
     device.destroy();
 
@@ -479,7 +520,14 @@ private:
       {}, vk::PrimitiveTopology::eTriangleList, VK_FALSE
     );
 
-    vk::PipelineVertexInputStateCreateInfo vertexInputInfo({}, 0, nullptr, 0, nullptr);
+    auto bindingDescription    = Vertex::getBindingDescription();
+    auto attributeDescriptions = Vertex::getAttributeDescriptions();
+
+    vk::PipelineVertexInputStateCreateInfo vertexInputInfo(
+      {}, 1, &bindingDescription,
+      attributeDescriptions.size(),
+      attributeDescriptions.data()
+    );
 
     vk::PipelineRasterizationStateCreateInfo rasterizer(
       {}, VK_FALSE, VK_FALSE,
@@ -552,6 +600,49 @@ private:
     );
   }
 
+  uint32_t findMemoryType(uint32_t typeFilter, vk::MemoryPropertyFlags properties) {
+    auto memProperties = physicalDevice.getMemoryProperties();
+
+    for (uint32_t i=0; i < memProperties.memoryTypeCount; i++) {
+      if (   typeFilter & (1 << i)
+          && (memProperties.memoryTypes[i].propertyFlags & properties) == properties)
+      {
+        return i;
+      }
+    }
+
+    throw std::runtime_error("failed to find suitable memory type!");
+  }
+
+  void createVertexBuffer() {
+    vk::BufferCreateInfo bufferInfo(
+      {}, sizeof(vertices[0]) * vertices.size(),
+      vk::BufferUsageFlagBits::eVertexBuffer,
+      vk::SharingMode::eExclusive
+    );
+
+    vertexBuffer = device.createBuffer(bufferInfo);
+
+    auto memRequirements = device.getBufferMemoryRequirements(vertexBuffer);
+
+    vertexBufferMemory = device.allocateMemory(
+      vk::MemoryAllocateInfo(
+        memRequirements.size,
+        findMemoryType(
+          memRequirements.memoryTypeBits,
+            vk::MemoryPropertyFlagBits::eHostVisible
+          | vk::MemoryPropertyFlagBits::eHostCoherent
+        )
+      )
+    );
+
+    void* data = device.mapMemory(vertexBufferMemory, 0, bufferInfo.size);
+    memcpy(data, vertices.data(), sizeof(Vertex) * vertices.size());
+    device.unmapMemory(vertexBufferMemory);
+
+    device.bindBufferMemory(vertexBuffer, vertexBufferMemory, 0);
+  }
+
   void createCommandBuffers() {
     commandBuffers.resize(swapChainFramebuffers.size());
 
@@ -570,6 +661,7 @@ private:
       };
 
       cmd.begin(vk::CommandBufferBeginInfo());
+
       cmd.beginRenderPass(
         vk::RenderPassBeginInfo(
           renderPass,
@@ -581,9 +673,14 @@ private:
       );
 
       cmd.bindPipeline(vk::PipelineBindPoint::eGraphics, graphicsPipeline);
-      cmd.draw(3, 1, 0, 0);
-      cmd.endRenderPass();
 
+      vk::Buffer vertexBuffers[] = {vertexBuffer};
+      vk::DeviceSize offsets[] = {0};
+      cmd.bindVertexBuffers(0, 1, vertexBuffers, offsets);
+
+      cmd.draw(static_cast<uint32_t>(vertices.size()), 1, 0, 0);
+
+      cmd.endRenderPass();
       cmd.end();
     }
   }
@@ -679,7 +776,7 @@ private:
     if (!deviceFeatures.shaderInt16) {
       return 0;
     }
-    
+
     if (!checkDeviceExtensionSupport(physicalDevice)) {
       return 0;
     }
@@ -848,7 +945,7 @@ private:
     const VkDebugUtilsMessengerCallbackDataEXT* pCallbackData,
     void* pUserData)
   {
-    std::cerr << "validation layer: " << pCallbackData->pMessage << std::endl;
+    std::cerr << "validation layer: " << pCallbackData->pMessage << std::endl << std::endl;
 
     return VK_FALSE;
   }
