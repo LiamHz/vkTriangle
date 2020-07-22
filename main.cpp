@@ -136,7 +136,6 @@ private:
   vk::Queue                      graphicsQueue;
   vk::Queue                      presentQueue;
 
-
   vk::SwapchainKHR               swapChain;
   vk::Format                     swapChainImageFormat;
   vk::Extent2D                   swapChainExtent;
@@ -614,33 +613,80 @@ private:
     throw std::runtime_error("failed to find suitable memory type!");
   }
 
-  void createVertexBuffer() {
-    vk::BufferCreateInfo bufferInfo(
-      {}, sizeof(vertices[0]) * vertices.size(),
-      vk::BufferUsageFlagBits::eVertexBuffer,
-      vk::SharingMode::eExclusive
+  void createBuffer(vk::DeviceSize size, vk::BufferUsageFlags usage, vk::MemoryPropertyFlags properties, vk::Buffer& buffer, vk::DeviceMemory& bufferMemory) {
+    buffer= device.createBuffer(
+      vk::BufferCreateInfo({}, size, usage, vk::SharingMode::eExclusive)
     );
 
-    vertexBuffer = device.createBuffer(bufferInfo);
+    auto memRequirements = device.getBufferMemoryRequirements(buffer);
 
-    auto memRequirements = device.getBufferMemoryRequirements(vertexBuffer);
-
-    vertexBufferMemory = device.allocateMemory(
+    bufferMemory = device.allocateMemory(
       vk::MemoryAllocateInfo(
         memRequirements.size,
-        findMemoryType(
-          memRequirements.memoryTypeBits,
-            vk::MemoryPropertyFlagBits::eHostVisible
-          | vk::MemoryPropertyFlagBits::eHostCoherent
-        )
+        findMemoryType(memRequirements.memoryTypeBits, properties)
       )
     );
 
-    void* data = device.mapMemory(vertexBufferMemory, 0, bufferInfo.size);
-    memcpy(data, vertices.data(), sizeof(Vertex) * vertices.size());
-    device.unmapMemory(vertexBufferMemory);
+    device.bindBufferMemory(buffer, bufferMemory, 0);
+  }
 
-    device.bindBufferMemory(vertexBuffer, vertexBufferMemory, 0);
+  void copyBuffer(vk::Buffer srcBuffer, vk::Buffer dstBuffer, vk::DeviceSize size) {
+    auto commandBuffers = device.allocateCommandBuffers(
+      vk::CommandBufferAllocateInfo(commandPool, vk::CommandBufferLevel::ePrimary, 1)
+    );
+
+    vk::CommandBuffer& cmd = commandBuffers[0];
+
+    cmd.begin(
+      vk::CommandBufferBeginInfo(vk::CommandBufferUsageFlagBits::eOneTimeSubmit)
+    );
+
+    auto copyRegion = vk::BufferCopy(0, 0, size);
+    cmd.copyBuffer(srcBuffer, dstBuffer, 1, &copyRegion);
+
+    cmd.end();
+
+    vk::SubmitInfo submitInfo{};
+    submitInfo.commandBufferCount = 1;
+    submitInfo.pCommandBuffers = &cmd;
+
+    graphicsQueue.submit(1, &submitInfo, nullptr);
+    graphicsQueue.waitIdle();
+
+    device.freeCommandBuffers(commandPool, 1, &cmd);
+  }
+
+  void createVertexBuffer() {
+    vk::DeviceSize bufferSize = sizeof(vertices[0]) * vertices.size();
+
+    vk::Buffer stagingBuffer;
+    vk::DeviceMemory stagingBufferMemory;
+
+    createBuffer(
+      bufferSize,
+      vk::BufferUsageFlagBits::eTransferSrc,
+        vk::MemoryPropertyFlagBits::eHostVisible
+      | vk::MemoryPropertyFlagBits::eHostCoherent,
+      stagingBuffer, stagingBufferMemory
+    );
+
+    void* data = device.mapMemory(stagingBufferMemory, 0, bufferSize);
+    memcpy(data, vertices.data(), (size_t) bufferSize);
+    device.unmapMemory(stagingBufferMemory);
+
+    createBuffer(
+      bufferSize,
+        vk::BufferUsageFlagBits::eTransferDst
+      | vk::BufferUsageFlagBits::eVertexBuffer,
+        vk::MemoryPropertyFlagBits::eHostVisible
+      | vk::MemoryPropertyFlagBits::eHostCoherent,
+      vertexBuffer, vertexBufferMemory
+    );
+
+    copyBuffer(stagingBuffer, vertexBuffer, bufferSize);
+
+    device.destroyBuffer(stagingBuffer);
+    device.freeMemory(stagingBufferMemory);
   }
 
   void createCommandBuffers() {
@@ -678,7 +724,7 @@ private:
       vk::DeviceSize offsets[] = {0};
       cmd.bindVertexBuffers(0, 1, vertexBuffers, offsets);
 
-      cmd.draw(static_cast<uint32_t>(vertices.size()), 1, 0, 0);
+      cmd.draw(vertices.size(), 1, 0, 0);
 
       cmd.endRenderPass();
       cmd.end();
@@ -878,6 +924,9 @@ private:
     QueueFamilyIndices indices;
     auto queueFamilies = physicalDevice.getQueueFamilyProperties();
 
+    // Prefer a queue family with both graphics capabilities and surface support
+    // Otherwise track the indices of the two different queue families that, together,
+    // support both of these things
     int i = 0;
     for (const auto& queueFamily : queueFamilies) {
       if (queueFamily.queueFlags & vk::QueueFlagBits::eGraphics) {
@@ -945,7 +994,7 @@ private:
     const VkDebugUtilsMessengerCallbackDataEXT* pCallbackData,
     void* pUserData)
   {
-    std::cerr << "validation layer: " << pCallbackData->pMessage << std::endl << std::endl;
+    std::cerr << std::endl << "validation layer: " << pCallbackData->pMessage << std::endl;
 
     return VK_FALSE;
   }
