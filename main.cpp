@@ -110,9 +110,15 @@ struct Vertex {
 
 const std::vector<Vertex> vertices = {
   //Position       Color
-  {{0.0f, -0.5f}, {1.0f, 0.0f, 0.0f}},
-  {{0.5f,  0.5f}, {0.0f, 1.0f, 0.0f}},
-  {{-0.5f, 0.5f}, {0.0f, 0.0f, 1.0f}}
+  {{-0.5f, -0.5f}, {1.0f, 0.0f, 0.0f}},
+  {{ 0.5f, -0.5f}, {0.0f, 1.0f, 0.0f}},
+  {{-0.5f,  0.5f}, {0.0f, 0.0f, 1.0f}},
+  {{ 0.5f,  0.5f}, {1.0f, 1.0f, 0.0f}}
+};
+
+const std::vector<uint16_t> indices = {
+  // Draw in clockwise order (to avoid back face culling)
+  0, 1, 3, 3, 2, 0
 };
 
 class vkTriangleApplication {
@@ -158,6 +164,8 @@ private:
 
   vk::Buffer                     vertexBuffer;
   vk::DeviceMemory               vertexBufferMemory;
+  vk::Buffer                     indexBuffer;
+  vk::DeviceMemory               indexBufferMemory;
 
   size_t                         currentFrame = 0;
   bool                           framebufferResized = false;
@@ -189,6 +197,7 @@ private:
     createFramebuffers();
     createCommandPool();
     createVertexBuffer();
+    createIndexBuffer();
     createCommandBuffers();
     createSyncObjects();
   }
@@ -211,8 +220,12 @@ private:
       device.destroyFence(inFlightFences[i]);
     }
 
+    device.destroyBuffer(indexBuffer);
+    device.freeMemory(indexBufferMemory);
+
     device.destroyBuffer(vertexBuffer);
     device.freeMemory(vertexBufferMemory);
+
     device.destroyCommandPool(commandPool);
     device.destroy();
 
@@ -656,9 +669,11 @@ private:
     device.freeCommandBuffers(commandPool, 1, &cmd);
   }
 
-  void createVertexBuffer() {
-    vk::DeviceSize bufferSize = sizeof(vertices[0]) * vertices.size();
+  template <typename T>
+  void createVkBuffer(const std::vector<T>& data, vk::Buffer& buffer, vk::DeviceMemory& bufferMemory, vk::BufferUsageFlagBits usage) {
+    vk::DeviceSize bufferSize = sizeof(data[0]) * data.size();
 
+    // Staging buffer is on the CPU
     vk::Buffer stagingBuffer;
     vk::DeviceMemory stagingBufferMemory;
 
@@ -670,23 +685,36 @@ private:
       stagingBuffer, stagingBufferMemory
     );
 
-    void* data = device.mapMemory(stagingBufferMemory, 0, bufferSize);
-    memcpy(data, vertices.data(), (size_t) bufferSize);
+    void* memData = device.mapMemory(stagingBufferMemory, 0, bufferSize);
+    memcpy(memData, data.data(), (size_t) bufferSize);
     device.unmapMemory(stagingBufferMemory);
 
+    // Create buffer on the GPU
     createBuffer(
       bufferSize,
-        vk::BufferUsageFlagBits::eTransferDst
-      | vk::BufferUsageFlagBits::eVertexBuffer,
+        vk::BufferUsageFlagBits::eTransferDst | usage,
         vk::MemoryPropertyFlagBits::eHostVisible
       | vk::MemoryPropertyFlagBits::eHostCoherent,
-      vertexBuffer, vertexBufferMemory
+      buffer, bufferMemory
     );
 
-    copyBuffer(stagingBuffer, vertexBuffer, bufferSize);
+    // Copy staging buffer to GPU buffer before creation is complete
+    copyBuffer(stagingBuffer, buffer, bufferSize);
 
     device.destroyBuffer(stagingBuffer);
     device.freeMemory(stagingBufferMemory);
+  }
+
+  void createVertexBuffer() {
+    createVkBuffer<Vertex>(
+      vertices, vertexBuffer, vertexBufferMemory, vk::BufferUsageFlagBits::eVertexBuffer
+    );
+  }
+
+  void createIndexBuffer() {
+    createVkBuffer<uint16_t>(
+      indices, indexBuffer, indexBufferMemory, vk::BufferUsageFlagBits::eIndexBuffer
+    );
   }
 
   void createCommandBuffers() {
@@ -724,7 +752,9 @@ private:
       vk::DeviceSize offsets[] = {0};
       cmd.bindVertexBuffers(0, 1, vertexBuffers, offsets);
 
-      cmd.draw(vertices.size(), 1, 0, 0);
+      cmd.bindIndexBuffer(indexBuffer, 0, vk::IndexType::eUint16);
+
+      cmd.drawIndexed(indices.size(), 1, 0, 0, 0);
 
       cmd.endRenderPass();
       cmd.end();
