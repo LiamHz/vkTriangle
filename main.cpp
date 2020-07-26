@@ -1,6 +1,7 @@
 #define GLFW_INCLUDE_VULKAN
 #define GLM_FORCE_RADIANS
 #define GLM_FORCE_DEFAULT_ALIGNED_GENTYPES
+#define GLM_FORCE_DEPTH_ZERO_TO_ONE
 #include <GLFW/glfw3.h>
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
@@ -90,7 +91,7 @@ struct SwapChainSupportDetails {
 };
 
 struct Vertex {
-  glm::vec2 pos;
+  glm::vec3 pos;
   glm::vec3 color;
   glm::vec2 texCoord;
 
@@ -123,16 +124,22 @@ struct Vertex {
 };
 
 const std::vector<Vertex> vertices = {
-  //Position       Color               Tex Coords
-  {{-0.5f, -0.5f}, {1.0f, 0.0f, 0.0f}, {0.0f, 0.0f}},
-  {{ 0.5f, -0.5f}, {0.0f, 1.0f, 0.0f}, {1.0f, 0.0f}},
-  {{ 0.5f,  0.5f}, {0.0f, 0.0f, 1.0f}, {1.0f, 1.0f}},
-  {{-0.5f,  0.5f}, {1.0f, 1.0f, 0.0f}, {0.0f, 1.0f}}
+  //Position              Color               Tex Coords
+  {{-0.5f, -0.5f, 0.0f}, {1.0f, 0.0f, 0.0f}, {0.0f, 0.0f}},
+  {{ 0.5f, -0.5f, 0.0f}, {0.0f, 1.0f, 0.0f}, {1.0f, 0.0f}},
+  {{ 0.5f,  0.5f, 0.0f}, {0.0f, 0.0f, 1.0f}, {1.0f, 1.0f}},
+  {{-0.5f,  0.5f, 0.0f}, {1.0f, 1.0f, 0.0f}, {0.0f, 1.0f}},
+
+  {{-0.5f, -0.5f, -0.5f}, {1.0f, 0.0f, 0.0f}, {0.0f, 0.0f}},
+  {{ 0.5f, -0.5f, -0.5f}, {0.0f, 1.0f, 0.0f}, {1.0f, 0.0f}},
+  {{ 0.5f,  0.5f, -0.5f}, {0.0f, 0.0f, 1.0f}, {1.0f, 1.0f}},
+  {{-0.5f,  0.5f, -0.5f}, {1.0f, 1.0f, 0.0f}, {0.0f, 1.0f}}
 };
 
 const std::vector<uint16_t> indices = {
   // Draw in clockwise order (to avoid back face culling)
-  0, 1, 2, 2, 3, 0
+  0, 1, 2, 2, 3, 0,
+  4, 5, 6, 6, 7, 4
 };
 
 struct UniformBufferObject {
@@ -197,9 +204,13 @@ private:
   std::vector<vk::DeviceMemory>  uniformBuffersMemory;
 
   vk::Image                      textureImage;
+  vk::DeviceMemory               textureImageMemory;
   vk::ImageView                  textureImageView;
   vk::Sampler                    textureSampler;
-  vk::DeviceMemory               textureImageMemory;
+
+  vk::Image                      depthImage;
+  vk::DeviceMemory               depthImageMemory;
+  vk::ImageView                  depthImageView;
 
   size_t                         currentFrame = 0;
   bool                           framebufferResized = false;
@@ -229,8 +240,9 @@ private:
     createRenderPass();
     createDescriptorSetLayout();
     createGraphicsPipeline();
-    createFramebuffers();
     createCommandPool();
+    createDepthResources();
+    createFramebuffers();
     createTextureImage();
     createTextureImageView();
     createTextureImageSampler();
@@ -289,6 +301,10 @@ private:
   }
 
   void cleanupSwapChain() {
+    device.destroyImageView(depthImageView);
+    device.destroyImage(depthImage);
+    device.freeMemory(depthImageMemory);
+
     for (auto framebuffer : swapChainFramebuffers) {
       device.destroyFramebuffer(framebuffer);
     }
@@ -455,8 +471,8 @@ private:
 
     uint32_t imageCount = swapChainSupport.surfaceCapabilities.minImageCount + 1;
     if (  swapChainSupport.surfaceCapabilities.maxImageCount > 0
-       && imageCount > swapChainSupport.surfaceCapabilities.maxImageCount)
-    {
+       && imageCount > swapChainSupport.surfaceCapabilities.maxImageCount
+    ) {
       imageCount = swapChainSupport.surfaceCapabilities.maxImageCount;
     }
 
@@ -506,19 +522,22 @@ private:
     createImageViews();
     createRenderPass();
     createGraphicsPipeline();
+    createDepthResources();
     createFramebuffers();
     createUniformBuffers();
     createDescriptorPool();
     createCommandBuffers();
   }
 
-  vk::ImageView createImageView(vk::Image image, vk::Format format) {
+  vk::ImageView createImageView(
+    vk::Image image, vk::Format format, vk::ImageAspectFlags aspectFlags
+  ) {
     auto imageView = device.createImageView(
       vk::ImageViewCreateInfo(
         vk::ImageViewCreateFlags(),
         image, vk::ImageViewType::e2D, format,
         vk::ComponentMapping(vk::ComponentSwizzle::eIdentity),
-        vk::ImageSubresourceRange(vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1)
+        vk::ImageSubresourceRange(aspectFlags, 0, 1, 0, 1)
       )
     );
 
@@ -530,7 +549,7 @@ private:
 
     for (size_t i=0; i < swapChainImages.size(); i++) {
       swapChainImageViews[i] = createImageView(
-        swapChainImages[i], swapChainImageFormat
+        swapChainImages[i], swapChainImageFormat, vk::ImageAspectFlagBits::eColor
       );
     }
   }
@@ -551,9 +570,24 @@ private:
       0, vk::ImageLayout::eColorAttachmentOptimal
     );
 
+    vk::AttachmentDescription depthAttachment(
+      {}, findDepthFormat(),
+      vk::SampleCountFlagBits::e1,
+      vk::AttachmentLoadOp::eClear,
+      vk::AttachmentStoreOp::eDontCare,
+      vk::AttachmentLoadOp::eDontCare,
+      vk::AttachmentStoreOp::eDontCare,
+      vk::ImageLayout::eUndefined,
+      vk::ImageLayout::eDepthStencilAttachmentOptimal
+    );
+
+    vk::AttachmentReference depthAttachmentRef(
+      1, vk::ImageLayout::eDepthStencilAttachmentOptimal
+    );
+
     vk::SubpassDescription subpass(
       {}, vk::PipelineBindPoint::eGraphics, {},
-      {}, 1, &colorAttachmentRef
+      {}, 1, &colorAttachmentRef, nullptr, &depthAttachmentRef
     );
 
     vk::SubpassDependency dependency(
@@ -564,8 +598,16 @@ private:
       vk::AccessFlagBits::eColorAttachmentWrite
     );
 
+    std::array<vk::AttachmentDescription, 2> attachments = {
+      colorAttachment,
+      depthAttachment
+    };
+
     renderPass = device.createRenderPass(
-      vk::RenderPassCreateInfo({}, 1, &colorAttachment, 1, &subpass, 1, &dependency)
+      vk::RenderPassCreateInfo(
+        {}, attachments.size(), attachments.data(),
+        1, &subpass, 1, &dependency
+      )
     );
   }
 
@@ -641,6 +683,13 @@ private:
       VK_FALSE, 1.0f, nullptr, VK_FALSE, VK_FALSE
     );
 
+    vk::PipelineDepthStencilStateCreateInfo depthStencil(
+        {}, VK_TRUE, VK_TRUE,
+        vk::CompareOp::eLess,
+        VK_FALSE, // depthBoundsTestEnable
+        VK_FALSE  // stencilTestEnable
+    );
+
     vk::PipelineColorBlendAttachmentState colorBlendAttachment{};
     colorBlendAttachment.colorWriteMask = vk::ColorComponentFlagBits::eR
                                         | vk::ColorComponentFlagBits::eG
@@ -665,7 +714,7 @@ private:
         {},               shaderStages.size(), shaderStages.data(),
         &vertexInputInfo, &inputAssembly,      nullptr,
         &viewportState,   &rasterizer,         &multisampling,
-        nullptr,          &colorBlending,      nullptr,
+        &depthStencil,    &colorBlending,      nullptr,
         pipelineLayout,   renderPass,          0
       )
     ).value;
@@ -681,11 +730,15 @@ private:
     swapChainFramebuffers.resize(swapChainImageViews.size());
 
     for (size_t i=0; i < swapChainImageViews.size(); i++) {
-      vk::ImageView attachments[] = {swapChainImageViews[i]};
+      std::array<vk::ImageView, 2> attachments = {
+        swapChainImageViews[i],
+        depthImageView
+      };
 
       swapChainFramebuffers[i] = device.createFramebuffer(
         vk::FramebufferCreateInfo(
-          {}, renderPass, 1, attachments,
+          {}, renderPass,
+          attachments.size(), attachments.data(),
           swapChainExtent.width, swapChainExtent.height, 1
         )
       );
@@ -705,8 +758,8 @@ private:
 
     for (uint32_t i=0; i < memProperties.memoryTypeCount; i++) {
       if (   typeFilter & (1 << i)
-          && (memProperties.memoryTypes[i].propertyFlags & properties) == properties)
-      {
+          && (memProperties.memoryTypes[i].propertyFlags & properties) == properties
+      ) {
         return i;
       }
     }
@@ -969,7 +1022,9 @@ private:
   }
 
   void createTextureImageView() {
-    textureImageView = createImageView(textureImage, vk::Format::eR8G8B8A8Srgb);
+    textureImageView = createImageView(
+      textureImage, vk::Format::eR8G8B8A8Srgb, vk::ImageAspectFlagBits::eColor
+    );
   }
 
   void createTextureImageSampler() {
@@ -1058,7 +1113,7 @@ private:
 
       vk::WriteDescriptorSet samplerDescriptorWrite(
         descriptorSets[i], 1, 0, 1,
-        vk::DescriptorType::eCombinedImageSampler, 
+        vk::DescriptorType::eCombinedImageSampler,
         &imageInfo, nullptr, nullptr
       );
 
@@ -1140,7 +1195,7 @@ private:
     for (size_t i=0; i < commandBuffers.size(); i++) {
       vk::CommandBuffer& cmd = commandBuffers[i];
 
-      std::vector<vk::ClearValue> clearColors = {
+      std::vector<vk::ClearValue> clearValues = {
         vk::ClearColorValue(std::array<float, 4>{0.0f, 0.0f, 0.0f, 1.0f}),
         vk::ClearDepthStencilValue(1.0f, 0)
       };
@@ -1152,7 +1207,7 @@ private:
           renderPass,
           swapChainFramebuffers[i],
           vk::Rect2D({0, 0}, swapChainExtent),
-          clearColors.size(), clearColors.data()
+          clearValues.size(), clearValues.data()
         ),
         vk::SubpassContents::eInline
       );
@@ -1208,8 +1263,8 @@ private:
 
     // Usually happens after a window resize
     if (   result == vk::Result::eErrorOutOfDateKHR
-        || result == vk::Result::eSuboptimalKHR)
-    {
+        || result == vk::Result::eSuboptimalKHR
+    ) {
       recreateSwapChain();
       return;
     }
@@ -1246,8 +1301,8 @@ private:
 
     if (   result == vk::Result::eErrorOutOfDateKHR
         || result == vk::Result::eSuboptimalKHR
-        || framebufferResized)
-    {
+        || framebufferResized
+    ) {
       recreateSwapChain();
       return;
     }
@@ -1277,8 +1332,8 @@ private:
 
     SwapChainSupportDetails swapChainSupport = querySwapChainSupport(physicalDevice);
     if (   swapChainSupport.surfaceFormats.empty()
-        || swapChainSupport.presentModes.empty())
-    {
+        || swapChainSupport.presentModes.empty()
+    ) {
       return 0;
     }
 
@@ -1288,6 +1343,59 @@ private:
     }
 
     return score;
+  }
+
+  void createDepthResources() {
+    auto depthFormat = findDepthFormat();
+
+    createImage(
+      swapChainExtent.width, swapChainExtent.height,
+      depthFormat, vk::ImageTiling::eOptimal,
+      vk::ImageUsageFlagBits::eDepthStencilAttachment,
+      vk::MemoryPropertyFlagBits::eDeviceLocal,
+      depthImage, depthImageMemory
+    );
+
+    depthImageView = createImageView(
+      depthImage, depthFormat, vk::ImageAspectFlagBits::eDepth
+    );
+  }
+
+  bool hasStencilComponent(vk::Format format) {
+    return format == vk::Format::eD32SfloatS8Uint
+        || format == vk::Format::eD24UnormS8Uint;
+  }
+
+  vk::Format findSupportedFormat(
+    const std::vector<vk::Format>& candidates,
+    vk::ImageTiling tiling, vk::FormatFeatureFlags features
+  ) {
+    for (auto format : candidates) {
+      auto props = physicalDevice.getFormatProperties(format);
+
+      if (   tiling == vk::ImageTiling::eLinear
+          && (props.linearTilingFeatures & features) == features
+      ) {
+        return format;
+      } else if (   tiling == vk::ImageTiling::eOptimal
+                 && (props.optimalTilingFeatures & features) == features
+      ) {
+        return format;
+      }
+    }
+
+    throw std::runtime_error("failed to find supported format!");
+  }
+
+  vk::Format findDepthFormat() {
+    return findSupportedFormat(
+      {
+        vk::Format::eD32Sfloat,
+        vk::Format::eD32SfloatS8Uint,
+        vk::Format::eD24UnormS8Uint
+      }, vk::ImageTiling::eOptimal,
+      vk::FormatFeatureFlagBits::eDepthStencilAttachment
+    );
   }
 
   SwapChainSupportDetails querySwapChainSupport(vk::PhysicalDevice physicalDevice) {
@@ -1303,8 +1411,8 @@ private:
     // Prefer SRGB color format if available
     for (const auto& availableFormat : availableFormats) {
       if (  availableFormat.format     == vk::Format::eB8G8R8A8Srgb
-         && availableFormat.colorSpace == vk::ColorSpaceKHR::eVkColorspaceSrgbNonlinear)
-      {
+         && availableFormat.colorSpace == vk::ColorSpaceKHR::eVkColorspaceSrgbNonlinear
+      ) {
         return availableFormat;
       }
     }
