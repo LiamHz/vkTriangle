@@ -2,12 +2,17 @@
 #define GLM_FORCE_RADIANS
 #define GLM_FORCE_DEFAULT_ALIGNED_GENTYPES
 #define GLM_FORCE_DEPTH_ZERO_TO_ONE
+#define GLM_ENABLE_EXPERIMENTAL
 #include <GLFW/glfw3.h>
 #include <glm/glm.hpp>
+#include <glm/gtx/hash.hpp>
 #include <glm/gtc/matrix_transform.hpp>
 
 #define STB_IMAGE_IMPLEMENTATION
 #include <stb_image.h>
+
+#define TINYOBJLOADER_IMPLEMENTATION
+#include <tiny_obj_loader.h>
 
 #include <vulkan/vulkan.hpp>
 
@@ -22,8 +27,9 @@
 #include <cstring>
 #include <vector>
 #include <array>
-#include <map>
 #include <set>
+#include <map>
+#include <unordered_map>
 
 //#define NDEBUG
 
@@ -31,6 +37,9 @@ const int MAX_FRAMES_IN_FLIGHT = 2;
 
 const uint32_t WIDTH  = 1440;
 const uint32_t HEIGHT = 900;
+
+const std::string MODEL_PATH = "../models/ivysaur.obj";
+const std::string TEXTURE_PATH = "../textures/ivysaur_diffuse.jpg";
 
 const std::vector<const char*> validationLayers = {
   "VK_LAYER_KHRONOS_validation"
@@ -121,26 +130,23 @@ struct Vertex {
 
     return attributeDescriptions;
   }
+
+  // Operator to test for equality between vertces, used in hash function
+  bool operator==(const Vertex& other) const {
+    return pos == other.pos && color == other.color && texCoord == other.texCoord;
+  }
 };
 
-const std::vector<Vertex> vertices = {
-  //Position              Color               Tex Coords
-  {{-0.5f, -0.5f, 0.0f}, {1.0f, 0.0f, 0.0f}, {0.0f, 0.0f}},
-  {{ 0.5f, -0.5f, 0.0f}, {0.0f, 1.0f, 0.0f}, {1.0f, 0.0f}},
-  {{ 0.5f,  0.5f, 0.0f}, {0.0f, 0.0f, 1.0f}, {1.0f, 1.0f}},
-  {{-0.5f,  0.5f, 0.0f}, {1.0f, 1.0f, 0.0f}, {0.0f, 1.0f}},
-
-  {{-0.5f, -0.5f, -0.5f}, {1.0f, 0.0f, 0.0f}, {0.0f, 0.0f}},
-  {{ 0.5f, -0.5f, -0.5f}, {0.0f, 1.0f, 0.0f}, {1.0f, 0.0f}},
-  {{ 0.5f,  0.5f, -0.5f}, {0.0f, 0.0f, 1.0f}, {1.0f, 1.0f}},
-  {{-0.5f,  0.5f, -0.5f}, {1.0f, 1.0f, 0.0f}, {0.0f, 1.0f}}
-};
-
-const std::vector<uint16_t> indices = {
-  // Draw in clockwise order (to avoid back face culling)
-  0, 1, 2, 2, 3, 0,
-  4, 5, 6, 6, 7, 4
-};
+// Hash function for vertices
+namespace std {
+  template<> struct hash<Vertex> {
+    size_t operator()(Vertex const& vertex) const {
+      return ((hash<glm::vec3>()(vertex.pos) ^
+              (hash<glm::vec3>()(vertex.color) << 1)) >> 1) ^
+              (hash<glm::vec2>()(vertex.texCoord) << 1);
+    }
+  };
+}
 
 struct UniformBufferObject {
   // Account for Vulkan aligment requirements
@@ -195,6 +201,8 @@ private:
   std::vector<vk::Fence>         inFlightFences;
   std::vector<vk::Fence>         imagesInFlight;
 
+  std::vector<uint32_t>          indices;
+  std::vector<Vertex>            vertices;
   vk::Buffer                     indexBuffer;
   vk::Buffer                     vertexBuffer;
   vk::DeviceMemory               indexBufferMemory;
@@ -246,6 +254,7 @@ private:
     createTextureImage();
     createTextureImageView();
     createTextureImageSampler();
+    loadModel();
     createVertexBuffer();
     createIndexBuffer();
     createUniformBuffers();
@@ -534,8 +543,7 @@ private:
   ) {
     auto imageView = device.createImageView(
       vk::ImageViewCreateInfo(
-        vk::ImageViewCreateFlags(),
-        image, vk::ImageViewType::e2D, format,
+        {}, image, vk::ImageViewType::e2D, format,
         vk::ComponentMapping(vk::ComponentSwizzle::eIdentity),
         vk::ImageSubresourceRange(aspectFlags, 0, 1, 0, 1)
       )
@@ -586,8 +594,8 @@ private:
     );
 
     vk::SubpassDescription subpass(
-      {}, vk::PipelineBindPoint::eGraphics, {},
-      {}, 1, &colorAttachmentRef, nullptr, &depthAttachmentRef
+      {}, vk::PipelineBindPoint::eGraphics, 0,
+      nullptr, 1, &colorAttachmentRef, nullptr, &depthAttachmentRef
     );
 
     vk::SubpassDependency dependency(
@@ -684,10 +692,10 @@ private:
     );
 
     vk::PipelineDepthStencilStateCreateInfo depthStencil(
-        {}, VK_TRUE, VK_TRUE,
-        vk::CompareOp::eLess,
-        VK_FALSE, // depthBoundsTestEnable
-        VK_FALSE  // stencilTestEnable
+      {}, VK_TRUE, VK_TRUE,
+      vk::CompareOp::eLess,
+      VK_FALSE, // depthBoundsTestEnable
+      VK_FALSE  // stencilTestEnable
     );
 
     vk::PipelineColorBlendAttachmentState colorBlendAttachment{};
@@ -924,9 +932,8 @@ private:
     // Create buffer on the GPU
     createBuffer(
       bufferSize,
-        vk::BufferUsageFlagBits::eTransferDst | usage,
-        vk::MemoryPropertyFlagBits::eHostVisible
-      | vk::MemoryPropertyFlagBits::eHostCoherent,
+      vk::BufferUsageFlagBits::eTransferDst | usage,
+      vk::MemoryPropertyFlagBits::eDeviceLocal,
       buffer, bufferMemory
     );
 
@@ -969,7 +976,7 @@ private:
   void createTextureImage() {
     int texWidth, texHeight, texChannels;
     stbi_uc* pixels = stbi_load(
-      "../textures/statue.jpg",
+      TEXTURE_PATH.c_str(),
       &texWidth, &texHeight, &texChannels,
       STBI_rgb_alpha
     );
@@ -995,6 +1002,8 @@ private:
     void* data = device.mapMemory(stagingBufferMemory, 0, imageSize);
     memcpy(data, pixels, (size_t) imageSize);
     device.unmapMemory(stagingBufferMemory);
+
+    stbi_image_free(pixels);
 
     createImage(
       texWidth, texHeight, vk::Format::eR8G8B8A8Srgb,
@@ -1047,6 +1056,53 @@ private:
     );
   }
 
+  void loadModel() {
+    tinyobj::attrib_t attrib;  // Holds positions, normals, and texture coordinates
+    std::vector<tinyobj::shape_t> shapes;
+    std::vector<tinyobj::material_t> materials;
+    std::string warn, err;
+
+    if (!tinyobj::LoadObj(
+          &attrib, &shapes, &materials,
+          &warn, &err,
+          MODEL_PATH.c_str()
+        )
+    ) {
+      throw std::runtime_error(warn + err);
+    }
+
+    std::unordered_map<Vertex, uint32_t> uniqueVertices{};
+
+    // Iterate over the shapes vertices and add them to the
+    // class memember `vertices` vector
+    for (const auto& shape : shapes) {
+      for (const auto& index : shape.mesh.indices) {
+        Vertex vertex{};
+
+        // Load arrays of floats into vectors
+        vertex.pos = {
+          attrib.vertices[3 * index.vertex_index + 0],
+          attrib.vertices[3 * index.vertex_index + 1],
+          attrib.vertices[3 * index.vertex_index + 2]
+        };
+
+        vertex.texCoord = {
+              attrib.texcoords[2 * index.texcoord_index + 0],
+          1.0-attrib.texcoords[2 * index.texcoord_index + 1] // Flip vertical coordinate
+        };
+
+        vertex.color = {1.0f, 1.0f, 1.0f};
+
+        if (uniqueVertices.count(vertex) == 0) {
+          uniqueVertices[vertex] = static_cast<uint32_t>(vertices.size());
+          vertices.push_back(vertex);
+        }
+
+        indices.push_back(uniqueVertices[vertex]);
+      }
+    }
+  }
+
   void createVertexBuffer() {
     createVkBuffer<Vertex>(
       vertices, vertexBuffer, vertexBufferMemory,
@@ -1055,7 +1111,7 @@ private:
   }
 
   void createIndexBuffer() {
-    createVkBuffer<uint16_t>(
+    createVkBuffer<uint32_t>(
       indices, indexBuffer, indexBufferMemory,
       vk::BufferUsageFlagBits::eIndexBuffer
     );
@@ -1157,16 +1213,23 @@ private:
 
     UniformBufferObject ubo{};
 
-    ubo.model = glm::rotate(
+    glm::mat4 uboRotation = glm::rotate(
       glm::mat4(1.0f),
-      (time / 2.0f) * glm::radians(90.0f),
-      glm::vec3(0.0f, 0.0f, 1.0f)
+      (1.0f + time / 2.0f) * glm::radians(90.0f),
+      glm::vec3(0.0f, 1.0f, 0.0f) // Rotation axis
     );
 
+    glm::mat4 uboTranslation = glm::translate(
+        glm::mat4(1.0f),
+        glm::vec3(0.0f, -0.67f, 0.0f)
+    );
+
+    ubo.model = uboRotation * uboTranslation;
+
     ubo.view = glm::lookAt(
-      glm::vec3(2.0f),
-      glm::vec3(0.0f),
-      glm::vec3(0.0f, 0.0f, 1.0f)
+      glm::vec3(0.0f, 1.0f, 3.0f), // Eye position
+      glm::vec3(0.0f),            // Center position
+      glm::vec3(0.0f, 1.0f, 0.0f) // Up Axis
     );
 
     ubo.proj = glm::perspective(
@@ -1195,7 +1258,7 @@ private:
     for (size_t i=0; i < commandBuffers.size(); i++) {
       vk::CommandBuffer& cmd = commandBuffers[i];
 
-      std::vector<vk::ClearValue> clearValues = {
+      std::array<vk::ClearValue, 2> clearValues{
         vk::ClearColorValue(std::array<float, 4>{0.0f, 0.0f, 0.0f, 1.0f}),
         vk::ClearDepthStencilValue(1.0f, 0)
       };
@@ -1218,7 +1281,7 @@ private:
       vk::DeviceSize offsets[] = {0};
 
       cmd.bindVertexBuffers(0, 1, vertexBuffers, offsets);
-      cmd.bindIndexBuffer(indexBuffer, 0, vk::IndexType::eUint16);
+      cmd.bindIndexBuffer(indexBuffer, 0, vk::IndexType::eUint32);
 
       cmd.bindDescriptorSets(
         vk::PipelineBindPoint::eGraphics,
@@ -1548,8 +1611,8 @@ private:
     VkDebugUtilsMessageSeverityFlagBitsEXT messageSeverity,
     VkDebugUtilsMessageTypeFlagsEXT messageType,
     const VkDebugUtilsMessengerCallbackDataEXT* pCallbackData,
-    void* pUserData)
-  {
+    void* pUserData
+  ) {
     std::cerr << std::endl << "validation layer: " << pCallbackData->pMessage << std::endl;
 
     return VK_FALSE;
