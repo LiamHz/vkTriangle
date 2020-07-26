@@ -10,7 +10,7 @@ find_package(glfw3 3.3 REQUIRED)
 
 if (VULKAN_FOUND)
   message(STATUS "Found Vulkan, Including and Linking now")
-  include_directories(${Vulkan_INCLUDE_DIRS})
+  include_directories(${Vulkan_INCLUDE_DIRS} "/usr/local/lib/stb")
 	target_link_libraries (${PROJECT_NAME} ${Vulkan_LIBRARIES} glfw)
 endif (VULKAN_FOUND)
 
