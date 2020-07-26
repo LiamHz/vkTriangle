@@ -92,6 +92,7 @@ struct SwapChainSupportDetails {
 struct Vertex {
   glm::vec2 pos;
   glm::vec3 color;
+  glm::vec2 texCoord;
 
   static vk::VertexInputBindingDescription getBindingDescription() {
     return vk::VertexInputBindingDescription(
@@ -99,8 +100,8 @@ struct Vertex {
     );
   }
 
-  static std::array<vk::VertexInputAttributeDescription, 2> getAttributeDescriptions() {
-    std::array<vk::VertexInputAttributeDescription, 2> attributeDescriptions;
+  static std::array<vk::VertexInputAttributeDescription, 3> getAttributeDescriptions() {
+    std::array<vk::VertexInputAttributeDescription, 3> attributeDescriptions;
 
     // Position
     attributeDescriptions[0] = vk::VertexInputAttributeDescription(
@@ -112,21 +113,26 @@ struct Vertex {
       1, 0, vk::Format::eR32G32B32Sfloat, offsetof(Vertex, color)
     );
 
+    // Texture coordinates
+    attributeDescriptions[2] = vk::VertexInputAttributeDescription(
+      2, 0, vk::Format::eR32G32Sfloat, offsetof(Vertex, texCoord)
+    );
+
     return attributeDescriptions;
   }
 };
 
 const std::vector<Vertex> vertices = {
-  //Position       Color
-  {{-0.5f, -0.5f}, {1.0f, 0.0f, 0.0f}},
-  {{ 0.5f, -0.5f}, {0.0f, 1.0f, 0.0f}},
-  {{-0.5f,  0.5f}, {0.0f, 0.0f, 1.0f}},
-  {{ 0.5f,  0.5f}, {1.0f, 1.0f, 0.0f}}
+  //Position       Color               Tex Coords
+  {{-0.5f, -0.5f}, {1.0f, 0.0f, 0.0f}, {0.0f, 0.0f}},
+  {{ 0.5f, -0.5f}, {0.0f, 1.0f, 0.0f}, {1.0f, 0.0f}},
+  {{ 0.5f,  0.5f}, {0.0f, 0.0f, 1.0f}, {1.0f, 1.0f}},
+  {{-0.5f,  0.5f}, {1.0f, 1.0f, 0.0f}, {0.0f, 1.0f}}
 };
 
 const std::vector<uint16_t> indices = {
   // Draw in clockwise order (to avoid back face culling)
-  0, 1, 3, 3, 2, 0
+  0, 1, 2, 2, 3, 0
 };
 
 struct UniformBufferObject {
@@ -569,8 +575,18 @@ private:
       vk::ShaderStageFlagBits::eVertex, nullptr
     );
 
+    vk::DescriptorSetLayoutBinding samplerLayoutBinding(
+      1, vk::DescriptorType::eCombinedImageSampler, 1,
+      vk::ShaderStageFlagBits::eFragment, nullptr
+    );
+
+    std::array<vk::DescriptorSetLayoutBinding, 2> bindings = {
+      uboLayoutBinding,
+      samplerLayoutBinding
+    };
+
    descriptorSetLayout = device.createDescriptorSetLayout(
-     vk::DescriptorSetLayoutCreateInfo({}, 1, &uboLayoutBinding)
+     vk::DescriptorSetLayoutCreateInfo({}, bindings.size(), bindings.data())
    );
   }
 
@@ -991,12 +1007,24 @@ private:
   }
 
   void createDescriptorPool() {
-    vk::DescriptorPoolSize poolSize(
+    vk::DescriptorPoolSize uniformBufferPoolSize(
       vk::DescriptorType::eUniformBuffer, swapChainImages.size()
     );
 
+    vk::DescriptorPoolSize samplerPoolSize(
+      vk::DescriptorType::eCombinedImageSampler, swapChainImages.size()
+    );
+
+    std::array<vk::DescriptorPoolSize, 2> poolSizes = {
+      uniformBufferPoolSize,
+      samplerPoolSize
+    };
+
     descriptorPool = device.createDescriptorPool(
-      vk::DescriptorPoolCreateInfo({}, swapChainImages.size(), 1, &poolSize)
+      vk::DescriptorPoolCreateInfo(
+        {}, swapChainImages.size(),
+        poolSizes.size(), poolSizes.data()
+      )
     );
   }
 
@@ -1017,13 +1045,33 @@ private:
         uniformBuffers[i], 0, sizeof(UniformBufferObject)
       );
 
-      vk::WriteDescriptorSet descriptorWrite(
+      vk::DescriptorImageInfo imageInfo(
+        textureSampler, textureImageView,
+        vk::ImageLayout::eShaderReadOnlyOptimal
+      );
+
+      vk::WriteDescriptorSet uniformBufferDescriptorWrite(
         descriptorSets[i], 0, 0, 1,
         vk::DescriptorType::eUniformBuffer,
         nullptr, &bufferInfo, nullptr
       );
 
-      device.updateDescriptorSets(1, &descriptorWrite, 0, nullptr);
+      vk::WriteDescriptorSet samplerDescriptorWrite(
+        descriptorSets[i], 1, 0, 1,
+        vk::DescriptorType::eCombinedImageSampler, 
+        &imageInfo, nullptr, nullptr
+      );
+
+      std::array<vk::WriteDescriptorSet, 2> descriptorWrites = {
+        uniformBufferDescriptorWrite,
+        samplerDescriptorWrite
+      };
+
+      device.updateDescriptorSets(
+        descriptorWrites.size(),
+        descriptorWrites.data(),
+        0, nullptr
+      );
     }
   }
 
