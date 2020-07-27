@@ -220,6 +220,13 @@ private:
   vk::DeviceMemory               depthImageMemory;
   vk::ImageView                  depthImageView;
 
+  // Render target
+  vk::Image                      colorImage;
+  vk::DeviceMemory               colorImageMemory;
+  vk::ImageView                  colorImageView;
+
+  vk::SampleCountFlagBits        msaaSamples = vk::SampleCountFlagBits::e1;
+
   size_t                         currentFrame = 0;
   bool                           framebufferResized = false;
 
@@ -249,6 +256,7 @@ private:
     createDescriptorSetLayout();
     createGraphicsPipeline();
     createCommandPool();
+    createColorResources();
     createDepthResources();
     createFramebuffers();
     createTextureImage();
@@ -310,6 +318,10 @@ private:
   }
 
   void cleanupSwapChain() {
+    device.destroyImageView(colorImageView);
+    device.destroyImage(colorImage);
+    device.freeMemory(colorImageMemory);
+
     device.destroyImageView(depthImageView);
     device.destroyImage(depthImage);
     device.freeMemory(depthImageMemory);
@@ -432,6 +444,7 @@ private:
     // Check if best candidate is suitable at all
     if (candidates.rbegin()->first > 0) {
       physicalDevice = candidates.rbegin()->second;
+      msaaSamples = getMaxUsableSampleCount();
     } else {
       throw std::runtime_error("failed to find a suitable GPU!");
     }
@@ -457,6 +470,7 @@ private:
     // Specify device features application will use
     vk::PhysicalDeviceFeatures deviceFeatures{};
     deviceFeatures.samplerAnisotropy = VK_TRUE;
+    //deviceFeatures.sampleRateShading = VK_TRUE; // Enable sample shading (interior AA)
 
     device = physicalDevice.createDevice(
       vk::DeviceCreateInfo(
@@ -531,6 +545,7 @@ private:
     createImageViews();
     createRenderPass();
     createGraphicsPipeline();
+    createColorResources();
     createDepthResources();
     createFramebuffers();
     createUniformBuffers();
@@ -565,8 +580,31 @@ private:
   void createRenderPass() {
     vk::AttachmentDescription colorAttachment(
       {}, swapChainImageFormat,
-      vk::SampleCountFlagBits::e1,
+      msaaSamples,
       vk::AttachmentLoadOp::eClear,
+      vk::AttachmentStoreOp::eStore,
+      vk::AttachmentLoadOp::eDontCare,
+      vk::AttachmentStoreOp::eDontCare,
+      vk::ImageLayout::eUndefined,
+      vk::ImageLayout::eColorAttachmentOptimal
+    );
+
+    vk::AttachmentDescription depthAttachment(
+      {}, findDepthFormat(),
+      msaaSamples,
+      vk::AttachmentLoadOp::eClear,
+      vk::AttachmentStoreOp::eDontCare,
+      vk::AttachmentLoadOp::eDontCare,
+      vk::AttachmentStoreOp::eDontCare,
+      vk::ImageLayout::eUndefined,
+      vk::ImageLayout::eDepthStencilAttachmentOptimal
+    );
+
+    // Resolve the multiple fragments per pixel created via MSAA
+    vk::AttachmentDescription colorAttachmentResolve(
+      {}, swapChainImageFormat,
+      vk::SampleCountFlagBits::e1,
+      vk::AttachmentLoadOp::eDontCare,
       vk::AttachmentStoreOp::eStore,
       vk::AttachmentLoadOp::eDontCare,
       vk::AttachmentStoreOp::eDontCare,
@@ -578,24 +616,20 @@ private:
       0, vk::ImageLayout::eColorAttachmentOptimal
     );
 
-    vk::AttachmentDescription depthAttachment(
-      {}, findDepthFormat(),
-      vk::SampleCountFlagBits::e1,
-      vk::AttachmentLoadOp::eClear,
-      vk::AttachmentStoreOp::eDontCare,
-      vk::AttachmentLoadOp::eDontCare,
-      vk::AttachmentStoreOp::eDontCare,
-      vk::ImageLayout::eUndefined,
-      vk::ImageLayout::eDepthStencilAttachmentOptimal
-    );
-
     vk::AttachmentReference depthAttachmentRef(
       1, vk::ImageLayout::eDepthStencilAttachmentOptimal
     );
 
+    vk::AttachmentReference colorAttachmentResolveRef(
+      2, vk::ImageLayout::eColorAttachmentOptimal
+    );
+
     vk::SubpassDescription subpass(
       {}, vk::PipelineBindPoint::eGraphics, 0,
-      nullptr, 1, &colorAttachmentRef, nullptr, &depthAttachmentRef
+      nullptr, 1,
+      &colorAttachmentRef,
+      &colorAttachmentResolveRef,
+      &depthAttachmentRef
     );
 
     vk::SubpassDependency dependency(
@@ -606,9 +640,10 @@ private:
       vk::AccessFlagBits::eColorAttachmentWrite
     );
 
-    std::array<vk::AttachmentDescription, 2> attachments = {
+    std::array<vk::AttachmentDescription, 3> attachments = {
       colorAttachment,
-      depthAttachment
+      depthAttachment,
+      colorAttachmentResolve
     };
 
     renderPass = device.createRenderPass(
@@ -687,8 +722,10 @@ private:
     rasterizer.lineWidth = 1.0f;
 
     vk::PipelineMultisampleStateCreateInfo multisampling(
-      {}, vk::SampleCountFlagBits::e1,
-      VK_FALSE, 1.0f, nullptr, VK_FALSE, VK_FALSE
+      {}, msaaSamples,
+      VK_FALSE, 1.0f, // Disable sample shading
+      nullptr,
+      VK_FALSE, VK_FALSE
     );
 
     vk::PipelineDepthStencilStateCreateInfo depthStencil(
@@ -738,9 +775,10 @@ private:
     swapChainFramebuffers.resize(swapChainImageViews.size());
 
     for (size_t i=0; i < swapChainImageViews.size(); i++) {
-      std::array<vk::ImageView, 2> attachments = {
+      std::array<vk::ImageView, 3> attachments = {
+        colorImageView,
+        depthImageView,
         swapChainImageViews[i],
-        depthImageView
       };
 
       swapChainFramebuffers[i] = device.createFramebuffer(
@@ -945,7 +983,9 @@ private:
   }
 
   void createImage(
-    uint32_t width, uint32_t height, vk::Format format,
+    uint32_t width, uint32_t height,
+    vk::SampleCountFlagBits numSamples,
+    vk::Format format,
     vk::ImageTiling tiling,
     vk::ImageUsageFlags usage,
     vk::MemoryPropertyFlagBits properties,
@@ -955,7 +995,7 @@ private:
       vk::ImageCreateInfo(
         {}, vk::ImageType::e2D, format,
         vk::Extent3D(width, height, 1), 1, 1,
-        vk::SampleCountFlagBits::e1,
+        numSamples,
         tiling, usage,
         vk::SharingMode::eExclusive
       )
@@ -1006,7 +1046,9 @@ private:
     stbi_image_free(pixels);
 
     createImage(
-      texWidth, texHeight, vk::Format::eR8G8B8A8Srgb,
+      texWidth, texHeight,
+      vk::SampleCountFlagBits::e1,  // TODO
+      vk::Format::eR8G8B8A8Srgb,
       vk::ImageTiling::eOptimal,
         vk::ImageUsageFlagBits::eTransferDst
       | vk::ImageUsageFlagBits::eSampled,
@@ -1408,12 +1450,33 @@ private:
     return score;
   }
 
+  void createColorResources() {
+    vk::Format colorFormat = swapChainImageFormat;
+
+    createImage(
+      swapChainExtent.width, swapChainExtent.height,
+      msaaSamples,
+      colorFormat,
+      vk::ImageTiling::eOptimal,
+        vk::ImageUsageFlagBits::eTransientAttachment
+      | vk::ImageUsageFlagBits::eColorAttachment,
+      vk::MemoryPropertyFlagBits::eDeviceLocal,
+      colorImage, colorImageMemory
+    );
+
+    colorImageView = createImageView(
+      colorImage, colorFormat, vk::ImageAspectFlagBits::eColor
+    );
+  }
+
   void createDepthResources() {
     auto depthFormat = findDepthFormat();
 
     createImage(
       swapChainExtent.width, swapChainExtent.height,
-      depthFormat, vk::ImageTiling::eOptimal,
+      msaaSamples,
+      depthFormat,
+      vk::ImageTiling::eOptimal,
       vk::ImageUsageFlagBits::eDepthStencilAttachment,
       vk::MemoryPropertyFlagBits::eDeviceLocal,
       depthImage, depthImageMemory
@@ -1459,6 +1522,21 @@ private:
       }, vk::ImageTiling::eOptimal,
       vk::FormatFeatureFlagBits::eDepthStencilAttachment
     );
+  }
+
+  vk::SampleCountFlagBits getMaxUsableSampleCount() {
+    auto deviceProperties = physicalDevice.getProperties();
+
+    vk::SampleCountFlags counts = deviceProperties.limits.framebufferColorSampleCounts
+                                 & deviceProperties.limits.framebufferDepthSampleCounts;
+    if (counts & vk::SampleCountFlagBits::e64) { return vk::SampleCountFlagBits::e64; }
+    if (counts & vk::SampleCountFlagBits::e32) { return vk::SampleCountFlagBits::e32; }
+    if (counts & vk::SampleCountFlagBits::e16) { return vk::SampleCountFlagBits::e16; }
+    if (counts & vk::SampleCountFlagBits::e8)  { return vk::SampleCountFlagBits::e8;  }
+    if (counts & vk::SampleCountFlagBits::e4)  { return vk::SampleCountFlagBits::e4;  }
+    if (counts & vk::SampleCountFlagBits::e2)  { return vk::SampleCountFlagBits::e2;  }
+
+    return vk::SampleCountFlagBits::e1;
   }
 
   SwapChainSupportDetails querySwapChainSupport(vk::PhysicalDevice physicalDevice) {
